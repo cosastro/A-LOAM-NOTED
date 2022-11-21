@@ -113,6 +113,7 @@ void removeClosedPointCloud(const pcl::PointCloud<PointT> &cloud_in,
 
 void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
 {
+    // 默认为false
     if (!systemInited)
     { 
         systemInitCount++;
@@ -137,19 +138,22 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
     pcl::removeNaNFromPointCloud(laserCloudIn, laserCloudIn, indices);
     removeClosedPointCloud(laserCloudIn, laserCloudIn, MINIMUM_RANGE);
 
-
     int cloudSize = laserCloudIn.points.size();
+    // 因为雷达是顺时针旋转，但人的习惯通常都是逆时针旋转，所以加一个负号
     float startOri = -atan2(laserCloudIn.points[0].y, laserCloudIn.points[0].x);
+    // 为了符合常识，手动加了2pi，因为正常情况是在哪里开始就在哪里结束，所以第一个点和最后一个点是一样的
     float endOri = -atan2(laserCloudIn.points[cloudSize - 1].y,
-                          laserCloudIn.points[cloudSize - 1].x) +
-                   2 * M_PI;
+                          laserCloudIn.points[cloudSize - 1].x) + 2 * M_PI;
 
+    // 保证结束点和起始点间隔是2pi左右，可能会上下波动一点
     if (endOri - startOri > 3 * M_PI)
     {
+        // 当起始角度为-179度，结束角度为179度，+2pi为179+360度，相减超过了3pi，不符合常识
         endOri -= 2 * M_PI;
     }
     else if (endOri - startOri < M_PI)
     {
+        // 当起始角度为179度，结束角度为-179度，+2pi为181度，181-179=2度，不符合常识
         endOri += 2 * M_PI;
     }
     //printf("end Ori %f\n", endOri);
@@ -164,11 +168,13 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
         point.y = laserCloudIn.points[i].y;
         point.z = laserCloudIn.points[i].z;
 
+        // 俯仰角
         float angle = atan(point.z / sqrt(point.x * point.x + point.y * point.y)) * 180 / M_PI;
         int scanID = 0;
 
         if (N_SCANS == 16)
         {
+            // 如：12.9度，int就变成了12度，+0.5就起到了四舍五入了
             scanID = int((angle + 15) / 2 + 0.5);
             if (scanID > (N_SCANS - 1) || scanID < 0)
             {
@@ -206,15 +212,19 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
         }
         //printf("angle %f scanID %d \n", angle, scanID);
 
+        // 计算水平角（航向角）
         float ori = -atan2(point.y, point.x);
+        // 是否扫过一半, 这段代码是为了将ori放到startOri和endOri之间的一个合理值
         if (!halfPassed)
         { 
             if (ori < startOri - M_PI / 2)
             {
+                // 当前方向比起始角度还小
                 ori += 2 * M_PI;
             }
             else if (ori > startOri + M_PI * 3 / 2)
             {
+                // 大于3pi/2
                 ori -= 2 * M_PI;
             }
 
@@ -469,20 +479,21 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "scanRegistration");
+    // 从配置服务器获取参数，注册话题等
     ros::NodeHandle nh;
 
     nh.param<int>("scan_line", N_SCANS, 16);
-
+    // 剔除近距离的点, kitti数据集用的是5米
     nh.param<double>("minimum_range", MINIMUM_RANGE, 0.1);
 
     printf("scan line number %d \n", N_SCANS);
-
     if(N_SCANS != 16 && N_SCANS != 32 && N_SCANS != 64)
     {
         printf("only support velodyne with 16, 32 or 64 scan line!");
         return 0;
     }
 
+    // 因为是订阅其他源的数据，节奏无法掌控，所以采用回调的方式
     ros::Subscriber subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_points", 100, laserCloudHandler);
 
     pubLaserCloud = nh.advertise<sensor_msgs::PointCloud2>("/velodyne_cloud_2", 100);
