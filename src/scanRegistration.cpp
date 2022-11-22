@@ -168,7 +168,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
         point.y = laserCloudIn.points[i].y;
         point.z = laserCloudIn.points[i].z;
 
-        // 俯仰角
+        // 俯仰角, 再计算点所属的线束
         float angle = atan(point.z / sqrt(point.x * point.x + point.y * point.y)) * 180 / M_PI;
         int scanID = 0;
 
@@ -214,22 +214,25 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
 
         // 计算水平角（航向角）
         float ori = -atan2(point.y, point.x);
-        // 是否扫过一半, 这段代码是为了将ori放到startOri和endOri之间的一个合理值
+
+        // 是否扫过一半
+        // 这段代码是为了将ori放到startOri和endOri之间的一个合理值
         if (!halfPassed)
         { 
             if (ori < startOri - M_PI / 2)
             {
-                // 当前方向比起始角度还小
+                // 还没到一半，但当前点角度小于起始角度pi/2
                 ori += 2 * M_PI;
             }
             else if (ori > startOri + M_PI * 3 / 2)
             {
-                // 大于3pi/2
+                // 还没到一半，但当前点角度大于起始角度3pi/2
                 ori -= 2 * M_PI;
             }
 
             if (ori - startOri > M_PI)
             {
+                // 过了一半
                 halfPassed = true;
             }
         }
@@ -246,80 +249,101 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
             }
         }
 
+        // 当前点相对于雷达起始扫描的时间
         float relTime = (ori - startOri) / (endOri - startOri);
         point.intensity = scanID + scanPeriod * relTime;
-        laserCloudScans[scanID].push_back(point); 
+        // 后续提取特征是在每个线上做的，这里用数组做线束区分
+        laserCloudScans[scanID].push_back(point);
     }
     
+    // 更新有效点云总数
     cloudSize = count;
     printf("points size %d \n", cloudSize);
 
+    // 用laserCloud存储所有线束拼接后的点云，因此会丢失对每一个线束的索引，需要额外维度索引
     pcl::PointCloud<PointType>::Ptr laserCloud(new pcl::PointCloud<PointType>());
     for (int i = 0; i < N_SCANS; i++)
     { 
-        scanStartInd[i] = laserCloud->size() + 5;// 记录每个scan的开始index，忽略前5个点
+        // 记录每条scan在laserCloud中的index，忽略前5个点
+        scanStartInd[i] = laserCloud->size() + 5;
+        // 拼接
         *laserCloud += laserCloudScans[i];
-        scanEndInd[i] = laserCloud->size() - 6;// 记录每个scan的结束index，忽略后5个点，开始和结束处的点云scan容易产生不闭合的“接缝”，对提取edge feature不利
+        // 记录每条scan的结束index，忽略后5个点
+        // 开始和结束处的点云容易产生不闭合的“接缝”，不利于提取edge feature
+        scanEndInd[i] = laserCloud->size() - 6;
     }
 
     printf("prepare time %f \n", t_prepare.toc());
 
+    // 计算曲率
     for (int i = 5; i < cloudSize - 5; i++)
     { 
         float diffX = laserCloud->points[i - 5].x + laserCloud->points[i - 4].x + laserCloud->points[i - 3].x + laserCloud->points[i - 2].x + laserCloud->points[i - 1].x - 10 * laserCloud->points[i].x + laserCloud->points[i + 1].x + laserCloud->points[i + 2].x + laserCloud->points[i + 3].x + laserCloud->points[i + 4].x + laserCloud->points[i + 5].x;
         float diffY = laserCloud->points[i - 5].y + laserCloud->points[i - 4].y + laserCloud->points[i - 3].y + laserCloud->points[i - 2].y + laserCloud->points[i - 1].y - 10 * laserCloud->points[i].y + laserCloud->points[i + 1].y + laserCloud->points[i + 2].y + laserCloud->points[i + 3].y + laserCloud->points[i + 4].y + laserCloud->points[i + 5].y;
         float diffZ = laserCloud->points[i - 5].z + laserCloud->points[i - 4].z + laserCloud->points[i - 3].z + laserCloud->points[i - 2].z + laserCloud->points[i - 1].z - 10 * laserCloud->points[i].z + laserCloud->points[i + 1].z + laserCloud->points[i + 2].z + laserCloud->points[i + 3].z + laserCloud->points[i + 4].z + laserCloud->points[i + 5].z;
 
+        // 实际计算的是当前点相对于左右5个点的偏离程度
         cloudCurvature[i] = diffX * diffX + diffY * diffY + diffZ * diffZ;
+        // 后面会根据曲率做排序，这里需要记录其原始索引
         cloudSortInd[i] = i;
-        cloudNeighborPicked[i] = 0;// 点有没有被选选择为feature点
-        cloudLabel[i] = 0;// Label 2: corner_sharp
-                          // Label 1: corner_less_sharp, 包含Label 2
-                          // Label -1: surf_flat
-                          // Label 0: surf_less_flat， 包含Label -1，因为点太多，最后会降采样
+        cloudNeighborPicked[i] = 0; // 当前点有没有被选选择为feature点
+        cloudLabel[i] = 0;          // Label  2: corner_sharp
+                                    // Label  1: corner_less_sharp, 包含Label 2
+                                    // Label -1: surf_flat
+                                    // Label  0: surf_less_flat， 包含Label -1，因为点太多，最后会降采样
     }
 
 
     TicToc t_pts;
 
+    // 特征提取
     pcl::PointCloud<PointType> cornerPointsSharp;
     pcl::PointCloud<PointType> cornerPointsLessSharp;
     pcl::PointCloud<PointType> surfPointsFlat;
     pcl::PointCloud<PointType> surfPointsLessFlat;
 
     float t_q_sort = 0;
-    for (int i = 0; i < N_SCANS; i++)// 按照scan的顺序提取4种特征点
+    for (int i = 0; i < N_SCANS; i++) // 按照scan的顺序提取4种特征点
     {
-        if( scanEndInd[i] - scanStartInd[i] < 6)// 如果该scan的点数少于7个点，就跳过
+        // 如果该scan的点数少于7个点，就跳过
+        if( scanEndInd[i] - scanStartInd[i] < 6)
             continue;
+
         pcl::PointCloud<PointType>::Ptr surfPointsLessFlatScan(new pcl::PointCloud<PointType>);
-        for (int j = 0; j < 6; j++)// 将该scan分成6小段执行特征检测
+        for (int j = 0; j < 6; j++) // 将该条scan分成6小段
         {
-            int sp = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * j / 6;// subscan的起始index
-            int ep = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * (j + 1) / 6 - 1;// subscan的结束index
+            // subscan的起始index
+            int sp = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * j / 6;
+            // subscan的结束index
+            int ep = scanStartInd[i] + (scanEndInd[i] - scanStartInd[i]) * (j + 1) / 6 - 1;
 
             TicToc t_tmp;
-            std::sort (cloudSortInd + sp, cloudSortInd + ep + 1, comp);// 根据曲率有小到大对subscan的点进行sort
+            // 根据曲率由小到大对subscan的点进行sort, 这里排序的是cloudSortInd数组，排序规则是曲率值大小
+            std::sort (cloudSortInd + sp, cloudSortInd + ep + 1, comp); // 3 22 181 5 69 27 18 99 777 121 63
             t_q_sort += t_tmp.toc();
 
             int largestPickedNum = 0;
-            for (int k = ep; k >= sp; k--)// 从后往前，即从曲率大的点开始提取corner feature
-            {
-                int ind = cloudSortInd[k]; 
 
-                if (cloudNeighborPicked[ind] == 0 &&
-                    cloudCurvature[ind] > 0.1)// 如果该点没有被选择过，并且曲率大于0.1
+            // 提取corner feature
+            // 从后往前遍历，即从曲率大的点开始
+            for (int k = ep; k >= sp; k--)
+            {
+                // 当前subscan中曲率最大的点, 可能是subscan中任何一个
+                int ind = cloudSortInd[k];
+
+                // 当前点没有被选择过，并且曲率大于0.1
+                if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] > 0.1)
                 {
                     largestPickedNum++;
-                    if (largestPickedNum <= 2)// 该subscan中曲率最大的前2个点认为是corner_sharp特征点
-                    {                        
+                    if (largestPickedNum <= 2) // 该subscan中曲率最大的前2个点认为是corner_sharp特征点
+                    {
                         cloudLabel[ind] = 2;
                         cornerPointsSharp.push_back(laserCloud->points[ind]);
                         cornerPointsLessSharp.push_back(laserCloud->points[ind]);
                     }
-                    else if (largestPickedNum <= 20)// 该subscan中曲率最大的前20个点认为是corner_less_sharp特征点
-                    {                        
-                        cloudLabel[ind] = 1; 
+                    else if (largestPickedNum <= 20) // 该subscan中曲率最大的前20个点认为是corner_less_sharp特征点
+                    {
+                        cloudLabel[ind] = 1;
                         cornerPointsLessSharp.push_back(laserCloud->points[ind]);
                     }
                     else
@@ -327,9 +351,11 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
                         break;
                     }
 
-                    cloudNeighborPicked[ind] = 1;// 标记该点被选择过了
+                    cloudNeighborPicked[ind] = 1; // 标记该点被选择过了
 
-                    // 与当前点距离的平方 <= 0.05的点标记为选择过，避免特征点密集分布
+                    // 遍历当前点左右各5个点，计算每个点与它前一个点的距离，如果<=0.05, 则标记为已选择
+                    // 循环中第一次计算的是与当前ind点的距离
+                    // 整体逻辑就是离当前点特别近的，直接认为也是特征点，只是不记录它，避免特征点密集分布
                     for (int l = 1; l <= 5; l++)
                     {
                         float diffX = laserCloud->points[ind + l].x - laserCloud->points[ind + l - 1].x;
@@ -339,7 +365,6 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
                         {
                             break;
                         }
-
                         cloudNeighborPicked[ind + l] = 1;
                     }
                     for (int l = -1; l >= -5; l--)
@@ -351,13 +376,13 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
                         {
                             break;
                         }
-
                         cloudNeighborPicked[ind + l] = 1;
                     }
                 }
             }
 
-            // 提取surf平面feature，与上述类似，选取该subscan曲率最小的前4个点为surf_flat
+            // 提取surf平面feature
+            // 与上述类似，选取该subscan曲率最小的前4个点为surf_flat
             int smallestPickedNum = 0;
             for (int k = sp; k <= ep; k++)
             {
