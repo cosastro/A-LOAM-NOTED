@@ -265,9 +265,10 @@ int main(int argc, char **argv)
 
             TicToc t_whole;
             // initializing
-            if (!systemInited)// 第一帧不进行匹配，仅仅将 cornerPointsLessSharp 保存至 laserCloudCornerLast
-                              //                       将 surfPointsLessFlat    保存至 laserCloudSurfLast
-                              // 为下次匹配提供target
+            // 第一帧不进行匹配，仅仅将 cornerPointsLessSharp 保存至 laserCloudCornerLast
+            // 将 surfPointsLessFlat    保存至 laserCloudSurfLast
+            // 为下次匹配提供target
+            if (!systemInited)
             {
                 systemInited = true;
                 std::cout << "Initialization finished \n";
@@ -278,15 +279,17 @@ int main(int argc, char **argv)
                 int surfPointsFlatNum = surfPointsFlat->points.size();
 
                 TicToc t_opt;
-                for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)// 点到线以及点到面的ICP，迭代2次
+                // 点到线以及点到面的ICP，迭代2次
+                for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)
                 {
                     corner_correspondence = 0;
                     plane_correspondence = 0;
 
                     //ceres::LossFunction *loss_function = NULL;
+                    // 核函数, 可以起到降低异常点权重的作用
                     ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
-                    ceres::LocalParameterization *q_parameterization =
-                        new ceres::EigenQuaternionParameterization();
+                    // 由于旋转不符合一般意义上的加法，这里需要借助ceres里的local parameter
+                    ceres::LocalParameterization *q_parameterization = new ceres::EigenQuaternionParameterization();
                     ceres::Problem::Options problem_options;
 
                     ceres::Problem problem(problem_options);
@@ -299,27 +302,38 @@ int main(int argc, char **argv)
 
                     TicToc t_data;
                     // 基于最近邻原理建立corner特征点之间关联，find correspondence for corner features
+                    // 寻找当前帧绝对sharp的线点与上一帧所有线点之间的对应关系，具体任务是找到两个点与之关联
                     for (int i = 0; i < cornerPointsSharpNum; ++i)
                     {
-                        TransformToStart(&(cornerPointsSharp->points[i]), &pointSel);// 将当前帧的corner_sharp特征点O_cur，从当前帧的Lidar坐标系下变换到上一帧的Lidar坐标系下（记为点O，注意与前面的点O_cur不同），以利于寻找corner特征点的correspondence
-                        kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);// kdtree中的点云是上一帧的corner_less_sharp，所以这是在上一帧
-                                                                                                        // 的corner_less_sharp中寻找当前帧corner_sharp特征点O的最近邻点（记为A）
+                        // 将当前帧的corner_sharp特征点O_cur，从当前帧的Lidar坐标系下变换到上一帧的Lidar坐标系下（记为点O，注意与前面的点O_cur不同）
+                        // 以利于寻找corner特征点的correspondence
+                        // 记为点O
+                        TransformToStart(&(cornerPointsSharp->points[i]), &pointSel);
+                        // kdtree中的点云是上一帧的corner_less_sharp
+                        // 所以这是在上一帧的corner_less_sharp中寻找当前帧corner_sharp特征点O的最近邻点（记为A）
+                        kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);
 
                         int closestPointInd = -1, minPointInd2 = -1;
                         if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD)// 如果最近邻的corner特征点之间距离平方小于阈值，则最近邻点A有效
                         {
+                            // 点A的索引
                             closestPointInd = pointSearchInd[0];
+                            // intensity整数部分存放的是scanID
                             int closestPointScanID = int(laserCloudCornerLast->points[closestPointInd].intensity);
 
                             double minPointSqDis2 = DISTANCE_SQ_THRESHOLD;
                             // 寻找点O的另外一个最近邻的点（记为点B） in the direction of increasing scan line
-                            for (int j = closestPointInd + 1; j < (int)laserCloudCornerLast->points.size(); ++j)// laserCloudCornerLast 来自上一帧的corner_less_sharp特征点,由于提取特征时是
-                            {                                                                                   // 按照scan的顺序提取的，所以laserCloudCornerLast中的点也是按照scanID递增的顺序存放的
+                            // laserCloudCornerLast存放的是上一帧corner_less_sharp特征点
+                            // 由于提取特征时是按照scan的顺序提取的，所以laserCloudCornerLast中后面点的scanID大于前面的
+                            for (int j = closestPointInd + 1; j < (int)laserCloudCornerLast->points.size(); ++j)
+                            {                                                                                   
                                 // if in the same scan line, continue
-                                if (int(laserCloudCornerLast->points[j].intensity) <= closestPointScanID)// intensity整数部分存放的是scanID
+                                // 不找同一线束的
+                                if (int(laserCloudCornerLast->points[j].intensity) <= closestPointScanID)
                                     continue;
 
                                 // if not in nearby scans, end the loop
+                                // 对垂直线束范围设置阈值
                                 if (int(laserCloudCornerLast->points[j].intensity) > (closestPointScanID + NEARBY_SCAN))
                                     break;
 
@@ -338,7 +352,7 @@ int main(int argc, char **argv)
                                 }
                             }
 
-                            // 寻找点O的另外一个最近邻的点B in the direction of decreasing scan line
+                            // 往线束小的方向寻找点O的另外一个最近邻的点B in the direction of decreasing scan line
                             for (int j = closestPointInd - 1; j >= 0; --j)
                             {
                                 // if in the same scan line, continue
@@ -364,6 +378,7 @@ int main(int argc, char **argv)
                                 }
                             }
                         }
+
                         if (minPointInd2 >= 0) // both closestPointInd and minPointInd2 is valid
                         {                      // 即特征点O的两个最近邻点A和B都有效
                             Eigen::Vector3d curr_point(cornerPointsSharp->points[i].x,
@@ -388,8 +403,10 @@ int main(int argc, char **argv)
                             corner_correspondence++;
                         }
                     }
+
+                    // find correspondence for plane features
                     // 下面说的点符号与上述相同
-                    // 与上面的建立corner特征点之间的关联类似，寻找平面特征点O的最近邻点ABC，即基于最近邻原理建立surf特征点之间的关联，find correspondence for plane features
+                    // 与上面的建立corner特征点之间的关联类似，寻找平面特征点O的最近邻点ABC，即基于最近邻原理建立surf特征点之间的关联
                     for (int i = 0; i < surfPointsFlatNum; ++i)
                     {
                         TransformToStart(&(surfPointsFlat->points[i]), &pointSel);
@@ -427,7 +444,8 @@ int main(int argc, char **argv)
                                 // if in the higher scan line
                                 else if (int(laserCloudSurfLast->points[j].intensity) > closestPointScanID && pointSqDis < minPointSqDis3)
                                 {
-                                    minPointSqDis3 = pointSqDis;// 找到的第3个最近邻点有效，更新点C，注意如果scanID准确的话，一般点A和点B的scanID相同,且与点C的scanID不同，与LOAM的paper叙述一致
+                                    // 找到的第3个最近邻点有效，更新点C，注意如果scanID准确的话，一般点A和点B的scanID相同,且与点C的scanID不同，与LOAM的paper叙述一致
+                                    minPointSqDis3 = pointSqDis;
                                     minPointInd3 = j;
                                 }
                             }
@@ -530,6 +548,7 @@ int main(int argc, char **argv)
             laserOdometry.pose.pose.position.z = t_w_curr.z();
             pubLaserOdometry.publish(laserOdometry);
 
+            // 轨迹topic, 只有rviz才会接收用于显示
             geometry_msgs::PoseStamped laserPose;
             laserPose.header = laserOdometry.header;
             laserPose.pose = laserOdometry.pose.pose;

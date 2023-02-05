@@ -36,9 +36,11 @@ struct LidarEdgeFactor
 		lp = q_last_curr * cp + t_last_curr;
 
 		// 点到线的计算如下图所示
+		// 两个向量的叉乘，模是三角形的面积
 		Eigen::Matrix<T, 3, 1> nu = (lp - lpa).cross(lp - lpb);
 		Eigen::Matrix<T, 3, 1> de = lpa - lpb;
 
+		// 残差的模是lp点到底边的垂直距离
 		// 最终的残差本来应该是residual[0] = nu.norm() / de.norm(); 为啥也分成3个，我也不知
 		// 道，从我试验的效果来看，确实是下面的残差函数形式，最后输出的pose精度会好一点点，这里需要
 		// 注意的是，所有的residual都不用加fabs，因为Ceres内部会对其求 平方 作为最终的残差项
@@ -56,9 +58,9 @@ struct LidarEdgeFactor
 				LidarEdgeFactor, 3, 4, 3>(
 //					             ^  ^  ^
 //					             |  |  |
-//			      残差的维度 ____|  |  |
-//			 优化变量q的维度 _______|  |
-//			 优化变量t的维度 __________|
+//			      	残差的维度 ____|  |  |
+//			 	优化变量q的维度 _______|  |
+//			 	优化变量t的维度 __________|
 			new LidarEdgeFactor(curr_point_, last_point_a_, last_point_b_, s_)));
 	}
 
@@ -76,14 +78,14 @@ struct LidarPlaneFactor
 	{
 		// 点l、j、m就是搜索到的最近邻的3个点，下面就是计算出这三个点构成的平面ljlm的法向量
 		ljm_norm = (last_point_j - last_point_l).cross(last_point_j - last_point_m);
-		// 归一化法向量
+		// 归一化法向量, 也就是法向量的单位向量
 		ljm_norm.normalize();
 	}
 
 	template <typename T>
 	bool operator()(const T *q, const T *t, T *residual) const
 	{
-
+		// 已知类型的eigen转换成模板化的eigen
 		Eigen::Matrix<T, 3, 1> cp{T(curr_point.x()), T(curr_point.y()), T(curr_point.z())};
 		Eigen::Matrix<T, 3, 1> lpj{T(last_point_j.x()), T(last_point_j.y()), T(last_point_j.z())};
 		//Eigen::Matrix<T, 3, 1> lpl{T(last_point_l.x()), T(last_point_l.y()), T(last_point_l.z())};
